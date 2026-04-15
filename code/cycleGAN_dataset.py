@@ -1,40 +1,15 @@
-#!/usr/bin/python
-#-*- coding: utf-8 -*- 
-#===========================================================
-#  File Name: cycleGAN_dataset.py
-#  Author: Xu Zhang, Columbia University
-#  Creation Date: 09-07-2019
-#  Last Modified: Fri Sep 27 12:20:49 2019
-#
-#  Usage:
-#  Description: Read and Cache CycleGAN image dataset 
-#
-#  Copyright (C) 2019 Xu Zhang
-#  All rights reserved.
-# 
-#  This file is made available under
-#  the terms of the BSD license (see the COPYING file).
-#===========================================================
-
 import os
-import errno
 import numpy as np
-from PIL import Image
 import torch
 import torch.utils.data as data
-import collections
-from tqdm import tqdm
-import random
 import glob
 import cv2
 
 
-#import pdb
-
 class cycleGAN_dataset(data.Dataset):
     def __init__(self, root, name, train=True, leave_one_out = False, transform=None, check_cached=False):
-        self.image_dir = r"./datasets/"
-        self.root = os.path.expanduser(root)
+        self.image_dir = root
+        self.root = root
         self.name = name
         self.data_dir = os.path.join(self.image_dir, name)
 
@@ -89,7 +64,7 @@ class cycleGAN_dataset(data.Dataset):
         if check_cached:
             if self._check_datafile_exists(data_file):
                 print('# Found cached data {}'.format(data_file))
-                #return
+                return
 
         # process and save as torch files
         print('# Caching data {}'.format(data_file))
@@ -99,38 +74,48 @@ class cycleGAN_dataset(data.Dataset):
         )
 
         with open(data_file, 'wb') as f:
-            torch.save(dataset, f)
+            torch.save(dataset, f, pickle_protocol=5)
 
 def read_image_file(data_dir, dataset_name, train_flag):
-    """Return a Tensor containing the patches
-    """
+    """Return a Tensor containing the patches"""
+    
     image_list = []
     label_list = []
-    #load all possible jpg or png images
-    if train_flag:
-        search_str = '{}/real/{}/train/*.jpg'.format(data_dir, dataset_name)
-    else:
-        search_str = '{}/real/{}/test/*.jpg'.format(data_dir, dataset_name)
-
-    print(f'Search string : {search_str}')
-    for filename in glob.glob(search_str):
-        image = cv2.imread(filename)
-        if image.shape[0]!=256:
-            image = cv2.resize(image, (256,256))
-        image_list.append(image)
-        label_list.append(1)
     
     if train_flag:
-        search_str = '{}fake/{}/train/*.jpg'.format(data_dir, dataset_name)
+        real_path = f"{data_dir}/real/{dataset_name}/train/"
+        fake_path = f"{data_dir}/fake/{dataset_name}/train/"
     else:
-        search_str = '{}/fake/{}/test/*.jpg'.format(data_dir, dataset_name)
+        real_path = f"{data_dir}/real/{dataset_name}/test/"
+        fake_path = f"{data_dir}/fake/{dataset_name}/test/"
 
-    for filename in glob.glob(search_str):
-        image = cv2.imread(filename)
-        if image.shape[0]!=256:
-            image = cv2.resize(image, (256,256))
-        image_list.append(image)
-        label_list.append(0)
+    extensions = ["jpg", "png"]
+
+    # REAL images (label = 1)
+    for ext in extensions:
+        search_str = f"{real_path}*.{ext}"
+        print(f"Search string : {search_str}")
+        
+        for filename in glob.glob(search_str):
+            image = cv2.imread(filename)
+            if image.shape[0] != 256:
+                image = cv2.resize(image, (256,256))
+            
+            image_list.append(image)
+            label_list.append(1)
+
+    # FAKE images (label = 0)
+    for ext in extensions:
+        search_str = f"{fake_path}*.{ext}"
+        print(f"Search string : {search_str}")
+        
+        for filename in glob.glob(search_str):
+            image = cv2.imread(filename)
+            if image.shape[0] != 256:
+                image = cv2.resize(image, (256,256))
+            
+            image_list.append(image)
+            label_list.append(0)
 
     return np.array(image_list), np.array(label_list)
 

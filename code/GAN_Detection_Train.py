@@ -1,41 +1,18 @@
-#!/usr/bin/python
-#-*- coding: utf-8 -*- 
-#===========================================================
-#  File Name: GAN_Detection_Train.py
-#  Author: Xu Zhang, Columbia University
-#  Creation Date: 09-07-2019
-#  Last Modified: Sun Sep 29 22:20:13 2019
-#
-#  Usage: python GAN_Detection_Train.py -h
-#  Description: Train a GAN image detector
-#
-#  Copyright (C) 2019 Xu Zhang
-#  All rights reserved.
-# 
-#  This file is made available under
-#  the terms of the BSD license (see the COPYING file).
-#===========================================================
-
 from __future__ import division, print_function
-import sys
 from copy import deepcopy
 import argparse
 import torch
-import torch.nn as nn
 import torch.optim as optim
 from torch.autograd import Variable
 import torch.backends.cudnn as cudnn
-import os
 from tqdm import tqdm
 import numpy as np
 import random
 import cv2
-import copy
 import cycleGAN_dataset
 import torch.nn as nn
 import logging
 from sklearn.metrics import classification_report, confusion_matrix
-import seaborn as sns
 import matplotlib.pyplot as plt
 import os
 import glob
@@ -44,7 +21,6 @@ import pywt
 
 from torchvision import transforms, models
 import pggan_dnet
-from skimage.feature import graycomatrix
 from torch.utils.data import DataLoader, random_split
 import copy
 import torchvision.transforms as transforms
@@ -226,28 +202,10 @@ class GANDataset(cycleGAN_dataset.cycleGAN_dataset):
         fft_images = im
         if self.args.feature != 'wavelet':
             im = np.transpose(im, (2,0,1))
-        #self.visualize_and_save(index, fft_images)
         return (im, label)
 
     def __len__(self):
         return self.labels.size(0)
-
-    def visualize_and_save(self, index, fft_images, output_path="C:/Users/yild_hi/PycharmProjects/fakesatelliteimagedetection1/Dataset_Visualization/"):
-        im = self.data[index]
-        label = self.labels[index]
-        path = os.path.join(output_path, f"image_{index}.png")
-
-        fig, axs = plt.subplots(1, 2, figsize=(12, 4))
-        axs[0].imshow(im)
-        axs[0].set_title(f"Original Image(Label: {label})")
-        axs[0].axis('off')
-
-        axs[1].imshow(np.log1p(np.abs(fft_images)), cmap="gray")
-        axs[1].set_title("Frequency Spectrum")
-        axs[1].axis('off')
-
-        plt.savefig(path)
-        plt.close(fig)
 
     def fast_fourier_transformation(self, im):
         im = im.astype(np.float32)
@@ -289,7 +247,7 @@ class GANDataset(cycleGAN_dataset.cycleGAN_dataset):
                     fft_img[21:203, 21:203] = 0
                 fft_img = np.fft.fftshift(fft_img)
             im[:, :, i] = fft_img
-            return im
+        return im
 
     def wavelet_transformation(self, im):
         im = im.astype(np.float32)
@@ -302,6 +260,11 @@ class GANDataset(cycleGAN_dataset.cycleGAN_dataset):
 
         resized_channels = [cv2.resize(c, (224, 224), interpolation=cv2.INTER_LINEAR) for c in wavelet_channels]
         im = np.stack(resized_channels, axis=0).astype(np.float32)
+        # Normalize to [-1,1]
+        im_min = im.min()
+        im_max = im.max()
+        im = (im - im_min) / (im_max - im_min + 1e-8)
+        im = (im - 0.5) * 2
         return im
 
     def high_pass_filter(self, fft_shifted):
@@ -318,10 +281,13 @@ def create_loaders():
 
     kwargs = {'num_workers': args.num_workers, 'pin_memory': args.pin_memory} if args.cuda else {}
 
-    transform = transforms.Compose([
+    if args.feature == 'wavelet':
+        transform = None
+    else:
+        transform = transforms.Compose([
             transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-            ])
+            transforms.Normalize((0.5,0.5,0.5),(0.5,0.5,0.5))
+    ])
 
     # Load full training dataset
     full_train_dataset = GANDataset(
@@ -482,8 +448,15 @@ def train(train_loader, val_loader, model, optimizer, criterion, epoch, logger):
     # Save model checkpoint every 10 epochs
     os.makedirs(f"{args.model_dir}{suffix}", exist_ok=True)
     if (epoch + 1) % 10 == 0:
-        torch.save({'epoch': epoch, 'state_dict': model.state_dict()},
-                   f"{args.model_dir}{suffix}/checkpoint_{epoch+1}.pth")
+        cpu_state_dict = {k: v.cpu() for k, v in model.state_dict().items()}
+
+        torch.save(
+            {
+                'epoch': epoch,
+                'state_dict': cpu_state_dict
+            },
+            f"{args.model_dir}{suffix}/checkpoint_{epoch+1}.pth"
+        )
 
 def test(test_loader, model, epoch, logger, logger_test_name):
     # evaluates the model on a test dataset
@@ -501,10 +474,10 @@ def test(test_loader, model, epoch, logger, logger_test_name):
     MAX_CAM_SAMPLES = 6
     global_idx = 0
 
-    # Create CAM directory per epoch
-    if not os.path.exists(
-            f"C:/Users/yild_hi/PycharmProjects/fakesatelliteimagedetection1/Spectral_Explainability/cam_epoch_{epoch}"):
-        os.makedirs(f"C:/Users/yild_hi/PycharmProjects/fakesatelliteimagedetection1/Spectral_Explainability/cam_epoch_{epoch}")
+    base_dir = "./outputs/cam/"
+    os.makedirs(base_dir, exist_ok=True)
+
+
     # Set up Grad Cam for ResNet model
     device = torch.device("cuda" if args.cuda else "cpu")
     model = model.to(device)
@@ -541,8 +514,32 @@ def test(test_loader, model, epoch, logger, logger_test_name):
                     "pred": pred[i].item(),  # model prediction
                     "index": global_idx
                 })
+            else:
+                j =random.randint(0, global_idx)
+                if j < MAX_CAM_SAMPLES:
+                    cam_cache[j] = {
+                    "tensor": image_pair[i].detach().cpu(),
+                    "gt": label[i].item(),  # ground truth
+                    "pred": pred[i].item(),  # model prediction
+                    "index": global_idx
+                }
             global_idx += 1
 
+    
+    # calculation and saving performance metrics
+    performance_metrics(all_labels, all_preds, epoch)
+    #display_random_test_samples(image_pair, all_labels, all_preds)
+
+    num_tests = test_loader.dataset.labels.size(0)
+    labels = np.vstack(labels).reshape(num_tests)
+    predicts = np.vstack(predicts).reshape(num_tests)
+    outputs = np.vstack(outputs).reshape(num_tests,2)
+
+    print('\33[91mTest set: {}\n\33[0m'.format(logger_test_name))
+
+    acc = np.sum(labels == predicts)/float(num_tests)
+    print('\33[91mTest set: Accuracy: {:.8f}\n\33[0m'.format(acc))
+    
     band_stats = {
         "real": {"LOW": [], "MID": [], "HIGH": []},
         "fake": {"LOW": [], "MID": [], "HIGH": []}
@@ -604,92 +601,11 @@ def test(test_loader, model, epoch, logger, logger_test_name):
         )
 
         # ----- Save results -----
-        base_path = (
-            f"C:/Users/yild_hi/PycharmProjects/fakesatelliteimagedetection1/"
-            f"Spectral_Explainability/cam_epoch_{epoch}/"
-            f"GT-{gt_label}_PRED-{pred_label}_IDX-{sample['index']}"
-        )
+        base_path = os.path.join(base_dir, f"GT-{gt_label}_...")
 
         cv2.imwrite(f"{base_path}_fft_cam.png", (cam_norm * 255).astype(np.uint8))
         cv2.imwrite(f"{base_path}_spatial_projection.png", (overlay * 255).astype(np.uint8))
 
-        #First version of gradcam
-       # # Save frequency CAM
-       # cam_uint8 = (cam_norm * 255).astype(np.uint8)
-       # save_path = (
-       #     f"C:/Users/yild_hi/PycharmProjects/fakesatelliteimagedetection1/"
-       #     f"Cam_Results/cam_epoch_{epoch}/"
-       #     f"fft_cam_{batch_idx}_{i}_{dominant_band}.png"
-       # )
-       # cv2.imwrite(save_path, cam_uint8)
-
-    '''
-    if cam is not None: #and batch_idx < 5:  # limit to first 5 batches
-        if args.feature == 'wavelet':
-            for i in range(min(image_pair.size(0), 2)):  # visualize max 2 images per batch
-                input_tensor = image_pair[i].unsqueeze(0)
-                target = [ClassifierOutputTarget(label[i].item())]
-
-                grayscale_cam = cam(input_tensor=input_tensor.to(device), targets=target)
-                grayscale_cam = grayscale_cam[0]
-
-                # Convert image to visualizable format
-                # Assuming you want to show only LL bands (channels 0–2)
-                img_np = image_pair[i, :3, :, :].detach().cpu().numpy()
-                img_np = img_np.transpose(1, 2, 0)
-                img_np = (img_np - img_np.min()) / (img_np.max() - img_np.min() + 1e-8)
-
-                cam_image = show_cam_on_image(img_np, grayscale_cam, use_rgb=True)
-
-                # Save the CAM image
-                cam_path = f"C:/Users/yild_hi/PycharmProjects/fakesatelliteimagedetection1/Cam_Results/sample_{batch_idx}_{i}.png"
-                cv2.imwrite(cam_path, cam_image)
-        elif 1:#args.feature == 'fft':
-            for i in range(min(image_pair.size(0), 2)):
-                input_tensor = image_pair[i].unsqueeze(0)
-
-                # Target class (ground truth)
-                target = [ClassifierOutputTarget(label[i].item())]
-
-                # Generate Grad-CAM (still on FFT input if model was trained on FFT)
-                grayscale_cam = cam(input_tensor=input_tensor.to(device), targets=target)[0]
-
-                img_spatial = image_pair[i].detach().cpu().numpy()  # (channels,H,W)
-                img_spatial = img_spatial.transpose(1, 2, 0)  # (H,W,channels)
-                img_spatial = (img_spatial - img_spatial.min()) / (img_spatial.max() - img_spatial.min() + 1e-8)
-
-                # Overlay CAM on spatial image
-                cam_image = show_cam_on_image(img_spatial, grayscale_cam, use_rgb=True)
-                cam_image_uint8 = (cam_image * 255).astype(np.uint8)
-
-                # Save overlay
-                cam_path = f"C:/Users/yild_hi/PycharmProjects/fakesatelliteimagedetection1/Cam_Results/spatial_overlay_{batch_idx}_{i}.png"
-                cv2.imwrite(cam_path, cam_image_uint8)
-
-                # Optional: save raw CAM heatmap
-                heatmap_path = f"C:/Users/yild_hi/PycharmProjects/fakesatelliteimagedetection1/Cam_Results/spatial_heatmap_{batch_idx}_{i}.png"
-                heatmap_uint8 = (grayscale_cam * 255).astype(np.uint8)
-                cv2.imwrite(heatmap_path, heatmap_uint8)
-
-                # Original image save
-                original_path = f"C:/Users/yild_hi/PycharmProjects/fakesatelliteimagedetection1/Cam_Results/original_image_{batch_idx}_{i}.png"
-                original_uint8 = (img_spatial * 255).astype(np.uint8)
-                cv2.imwrite(original_path, original_uint8)
-    '''
-
-    # calculation and saving performance metrics
-    performance_metrics(all_labels, all_preds, epoch)
-    #display_random_test_samples(image_pair, all_labels, all_preds)
-
-    num_tests = test_loader.dataset.labels.size(0)
-    labels = np.vstack(labels).reshape(num_tests)
-    predicts = np.vstack(predicts).reshape(num_tests)
-    outputs = np.vstack(outputs).reshape(num_tests,2)
-
-    print('\33[91mTest set: {}\n\33[0m'.format(logger_test_name))
-
-    acc = np.sum(labels == predicts)/float(num_tests)
-    print('\33[91mTest set: Accuracy: {:.8f}\n\33[0m'.format(acc))
     
     if (args.enable_logging):
         logger.log_value(logger_test_name+' Acc', acc)
@@ -703,46 +619,6 @@ def performance_metrics(all_labels, all_preds, epoch):
     print(f"Classification Report:\n{class_report}")
     print(f"Confusion Matrix:\n{conf_matrix}")
 
-    # Save the classification report to a file
-    report_file_path = os.path.join(args.model_dir, "classification_report_test.txt")
-    # Append the results to the file for each epoch
-    with open(report_file_path, 'a') as f:
-        f.write(f"Epoch {epoch + 1}/{args.epochs}\n")
-        f.write(f"Classification Report:\n{class_report}\n")
-        f.write(f"Confusion Matrix:\n{conf_matrix}\n")
-        f.write("\n" + "=" * 50 + "\n")  # Add a separator between epochs for clarity
-
-    # Visualize the confusion matrix
-    plt.figure(figsize=(8, 6))
-    sns.heatmap(conf_matrix, annot=True, fmt='d', cmap='Blues',
-                xticklabels=args.class_names, yticklabels=args.class_names)
-    plt.xlabel('Predicted Labels')
-    plt.ylabel('True Labels')
-    plt.title('Confusion Matrix')
-    plt.savefig(os.path.join(args.model_dir, "confusion_matrix.png"))
-    plt.close()
-
-def display_random_test_samples(images, labels, preds):
-    #image, labels = read_image_file(args.data_dir, args.dataset_name, 0)
-    # Select five random indices
-    imggs, labs = read_test_images()
-    random_indices = random.sample(range(len(images)), 5)
-
-    # Plot the images with their ground truth and predicted labels
-    plt.figure(figsize=(15, 5))
-    for i, idx in enumerate(random_indices):
-        img_spec = images[idx].cpu().permute(1, 2, 0).numpy()  # Convert tensor to numpy (H, W, C)
-        img = cv2.cvtColor(imggs[idx], cv2.COLOR_BGR2RGB)
-        true_label = args.class_names[labels[idx].item()]
-        predicted_label = args.class_names[preds[idx].item()]
-
-        plt.subplot(2, 5, i + 1)
-        plt.imshow(img)
-        plt.title(f"True: {true_label}\nPred: {predicted_label}")
-        plt.subplot(2, 5, i + 6)
-        plt.imshow(img_spec)
-        plt.axis('off')
-    plt.show()
 
 def read_test_images():
     """
@@ -784,16 +660,21 @@ def read_test_images():
 
     return images, labels
 
-def plot_losses():
+def plot_losses(save_path="loss_curve.png"):
     plt.figure(figsize=(8, 6))
-    plt.plot(range(1, len(train_losses) + 1), train_losses, label='Train Loss', marker='o')
-    plt.plot(range(1, len(val_losses) + 1), val_losses, label='Validation Loss', marker='o')
+    plt.plot(range(1, len(train_losses) + 1), train_losses,
+             label='Train Loss', marker='o')
+    plt.plot(range(1, len(val_losses) + 1), val_losses,
+             label='Validation Loss', marker='o')
     plt.xlabel('Epochs')
     plt.ylabel('Loss')
     plt.title('Training and Validation Loss')
     plt.legend()
     plt.grid()
-    plt.show()
+
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()   # <-- important: prevents showing / memory leak
+
 
 def adjust_learning_rate(optimizer):
     """Updates the learning rate given the learning rate decay.
@@ -826,11 +707,15 @@ def create_optimizer(model, new_lr):
 def main(train_loader, val_loader, test_loaders, model, logger):
     print('\nparsed options:\n{}\n'.format(vars(args)))
 
+    # Set device
+    device = torch.device("cuda" if args.cuda else "cpu")
+    model = model.to(device)
+
     optimizer1 = create_optimizer(model, args.lr)
     criterion = nn.CrossEntropyLoss()
-    if args.cuda:
-        model.cuda()
-        criterion.cuda()
+    #if args.cuda:
+    #    model.cuda()
+    #    criterion.cuda()
 
     # optionally resume from a checkpoint
     if args.resume:
@@ -845,14 +730,13 @@ def main(train_loader, val_loader, test_loaders, model, logger):
             
     start = args.start_epoch
     end = start + args.epochs
-    for test_loader in test_loaders:
-        test(test_loader['dataloader'], model, 0, logger, test_loader['name'])
+
     for epoch in range(start, end):
         # iterate over test loaders and test results
         train(train_loader,val_loader, model, optimizer1, criterion, epoch, logger)
-        if epoch==(end-1):
-            for test_loader in test_loaders:
-                test(test_loader['dataloader'], model, epoch+1, logger, test_loader['name'])
+
+    for test_loader in test_loaders:
+        test(test_loader['dataloader'], model, end-1, logger, test_loader['name'])
     plot_losses()
         
 if __name__ == '__main__':
@@ -866,7 +750,7 @@ if __name__ == '__main__':
     pretrain_flag = not args.feature=='comatrix'
     if args.model == 'resnet':
         if args.feature == 'wavelet':
-            model = models.resnet34(pretrained=True)
+            model = models.resnet34(pretrained=False)
             new_input_channels = 12  # because you use LL, LH, HL, HH for R, G, B
             original_conv = model.conv1
             model.conv1 = nn.Conv2d(

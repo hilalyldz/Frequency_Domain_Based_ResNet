@@ -1,23 +1,3 @@
-#!/usr/bin/python
-#-*- coding: utf-8 -*- 
-#===========================================================
-#  File Name: run_training.py
-#  Author: Xu Zhang, Columbia University
-#  Creation Date: 09-07-2019
-#  Last Modified: Tue Oct 15 16:27:57 2019
-#
-#  Usage: python run_training 
-#  Description: Train a GAN image detector
-#
-#  Copyright (C) 2019 Xu Zhang
-#  All rights reserved.
-# 
-#  This file is made available under
-#  the terms of the BSD license (see the COPYING file).
-#===========================================================
-
-#! /usr/bin/env python2
-
 import time
 import subprocess
 import shlex
@@ -35,8 +15,7 @@ parser.add_argument('--gpu-id', default='0', help='Feature used for training, ch
 args = parser.parse_args()
 
 gpu_set = args.gpu_id.split(',')
-# add more gpu if wanted
-# gpu_set = ['0','1']
+
 
 #Compare image and spectrum
 if args.feature == 'image':
@@ -49,13 +28,6 @@ elif args.feature == 'fft':
             ]
 elif args.feature == 'wavelet':
     parameter_set = ['--feature=wavelet ']
-#Compare different frequency band
-#parameter_set = [
-#        ' --feature=fft '
-#        ' --feature=fft --mode=1'
-#        ' --feature=fft --mode=2'
-#        ' --feature=fft --mode=3'
-#        ]
 else:
     print('Not a valid feature!')
     exit(-1)
