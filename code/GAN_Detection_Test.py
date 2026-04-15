@@ -17,18 +17,13 @@
 #===========================================================
 
 from __future__ import division, print_function
-import sys
-from copy import deepcopy
 import argparse
 import torch
-import torch.nn as nn
-import torchvision.datasets as dset
 from torch.autograd import Variable
 import torch.backends.cudnn as cudnn
 import os
 from tqdm import tqdm
 import numpy as np
-import random
 import cv2
 import copy
 from GAN_Detection_Train import GANDataset
@@ -40,6 +35,7 @@ import logging
 import matplotlib.pyplot as plt
 import seaborn as sns
 import glob
+import pywt
 
 from torchvision import transforms, models
 
@@ -51,7 +47,7 @@ parser = argparse.ArgumentParser(description='PyTorch GAN Image Detection')
 
 # Training settings
 parser.add_argument('--dataroot', type=str,
-                    default='./datasets/',
+                    default=r'C:\Users\yild_hi\PycharmProjects\fakesatelliteimagedetection1\CMF_Data_original',
                     help='path to dataset')
 parser.add_argument('--training-set', default= 'horse',
                     help='The name of the training set. If leave_one_out flag is set, \
@@ -225,6 +221,122 @@ def spatial_backprojection(fft_channels, cam):
                   (spatial_map.max() - spatial_map.min() + 1e-8)
     return spatial_map
 
+def wavelet_backprojection(wavelet_tensor, cam):
+    """
+    wavelet_tensor: (12,H,W) numpy array
+    cam: GradCAM map (H,W) normalized [0,1]
+
+    returns: spatial artifact map (H,W)
+    """
+
+    spatial_maps = []
+
+    for c in range(3):  # R, G, B
+        LL = wavelet_tensor[c]
+        LH = wavelet_tensor[c+3]
+        HL = wavelet_tensor[c+6]
+        HH = wavelet_tensor[c+9]
+
+        # Weight coefficients using CAM
+        LL_w = LL * cam
+        LH_w = LH * cam
+        HL_w = HL * cam
+        HH_w = HH * cam
+
+        # Inverse wavelet
+        coeffs = (LL_w, (LH_w, HL_w, HH_w))
+        reconstructed = pywt.idwt2(coeffs, 'haar')
+
+        spatial_maps.append(np.abs(reconstructed))
+
+    spatial_map = np.mean(spatial_maps, axis=0)
+
+    spatial_map = (spatial_map - spatial_map.min()) / \
+                  (spatial_map.max() - spatial_map.min() + 1e-8)
+
+    return spatial_map
+
+def wavelet_band_contribution(wavelet_tensor, cam):
+    """
+    wavelet_tensor: (12, H, W)
+    cam: (H, W)
+
+    returns:
+        band_scores: dict
+        dominant_band: str
+    """
+
+    band_scores = {
+        "LL": 0.0,
+        "LH": 0.0,
+        "HL": 0.0,
+        "HH": 0.0
+    }
+
+    for c in range(3):  # RGB
+
+        LL = wavelet_tensor[c]
+        LH = wavelet_tensor[c + 3]
+        HL = wavelet_tensor[c + 6]
+        HH = wavelet_tensor[c + 9]
+
+        band_scores["LL"] += np.mean(np.abs(LL) * cam)
+        band_scores["LH"] += np.mean(np.abs(LH) * cam)
+        band_scores["HL"] += np.mean(np.abs(HL) * cam)
+        band_scores["HH"] += np.mean(np.abs(HH) * cam)
+
+    # average over RGB
+    for key in band_scores:
+        band_scores[key] /= 3.0
+
+    dominant_band = max(band_scores, key=band_scores.get)
+
+    return band_scores, dominant_band
+
+def compute_mean_scores(score_list):
+    mean_scores = {
+        "LL": 0.0,
+        "LH": 0.0,
+        "HL": 0.0,
+        "HH": 0.0
+    }
+
+    if len(score_list) == 0:
+        return mean_scores
+
+    for s in score_list:
+        for key in mean_scores:
+            mean_scores[key] += s[key]
+
+    for key in mean_scores:
+        mean_scores[key] /= len(score_list)
+
+    return mean_scores
+
+def create_thesis_figure(original, gradcam, spatial, overlay, save_path):
+
+    fig, axs = plt.subplots(1, 4, figsize=(16, 4))
+
+    axs[0].imshow(original)
+    axs[0].set_title("(a) Original")
+    axs[0].axis('off')
+
+    axs[1].imshow(gradcam)
+    axs[1].set_title("(b) Grad-CAM")
+    axs[1].axis('off')
+
+    axs[2].imshow(spatial)
+    axs[2].set_title("(c) Spatial Projection")
+    axs[2].axis('off')
+
+    axs[3].imshow(overlay)
+    axs[3].set_title("(d) Overlay")
+    axs[3].axis('off')
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300)
+    plt.close()
+
 def read_test_images():
     """
     Reads images from the specified directories and returns image and label arrays.
@@ -312,37 +424,37 @@ def create_loaders():
                      check_cached=args.check_cached,
                      transform=transform, args=args),
                         batch_size=args.test_batch_size,
-                        shuffle=True, **kwargs)}
+                        shuffle=False, **kwargs)}
                     for name in test_dataset_names]
 
     return test_loaders
 
 def test(test_loader, model, epoch, logger_test_name):
-    # switch to evaluate mode
+
     model.eval()
 
     all_preds = []
     all_labels = []
+    labels, predicts, outputs = [], [], []
+    all_wavelet_scores = []
+    real_wavelet_scores = []
+    fake_wavelet_scores = []
 
-    labels, predicts = [], []
-    outputs = []
+    save_dir = f"C:/Users/yild_hi/PycharmProjects/fakesatelliteimagedetection1/Spectral_Explainability_ALL/"
+    os.makedirs(save_dir, exist_ok=True)
 
-    cam_cache = []
-    MAX_CAM_SAMPLES = 6
-    global_idx = 0
-
-    # Create CAM directory per epoch
-    if not os.path.exists(
-            f"C:/Users/yild_hi/PycharmProjects/fakesatelliteimagedetection1/Spectral_Explainability/cam_epoch_{epoch}"):
-        os.makedirs(f"C:/Users/yild_hi/PycharmProjects/fakesatelliteimagedetection1/Spectral_Explainability/cam_epoch_{epoch}")
-    # Set up Grad Cam for ResNet model
     device = torch.device("cuda" if args.cuda else "cpu")
     model = model.to(device)
-    cam = None
+
     target_layer = model.layer4[-1]
     cam = GradCAM(model=model, target_layers=[target_layer])
 
     pbar = tqdm(enumerate(test_loader))
+
+    spatial_images, _ = read_test_images()
+
+    global_idx = 0
+
     for batch_idx, (image_pair, label) in pbar:
 
         if args.cuda:
@@ -352,130 +464,229 @@ def test(test_loader, model, epoch, logger_test_name):
             image_pair, label = Variable(image_pair), Variable(label)
 
         out = model(image_pair)
-        _, pred = torch.max(out,1)
+        _, pred = torch.max(out, 1)
 
-        # Store predictions and true labels for classification report
-        preds = torch.argmax(out, dim=1)  # Convert logits to class predictions
+        preds = torch.argmax(out, dim=1)
         all_preds.extend(preds.cpu().numpy())
         all_labels.extend(label.cpu().numpy())
 
         ll = label.data.cpu().numpy().reshape(-1, 1)
-        pred = pred.data.cpu().numpy().reshape(-1, 1)
-        out = out.data.cpu().numpy().reshape(-1, 2)
-        labels.append(ll)
-        predicts.append(pred)
-        outputs.append(out)
+        pr = pred.data.cpu().numpy().reshape(-1, 1)
+        out_np = out.data.cpu().numpy().reshape(-1, 2)
 
-        # Cached data for Grad-CAM
+        labels.append(ll)
+        predicts.append(pr)
+        outputs.append(out_np)
+
+        # ===============================
+        # 🔥 Grad-CAM for ALL IMAGES
+        # ===============================
         for i in range(image_pair.size(0)):
-            if len(cam_cache) < MAX_CAM_SAMPLES:
-                cam_cache.append({
-                    "tensor": image_pair[i].detach().cpu(),
-                    "gt": label[i].item(),  # ground truth
-                    "pred": pred[i].item(),  # model prediction
-                    "index": global_idx
-                })
+
+            input_tensor = image_pair[i].unsqueeze(0).to(device)
+
+            gt_label = args.class_names[label[i].item()]
+            pred_label = args.class_names[pred[i].item()]
+
+            # ---- Grad-CAM ----
+            grayscale_cam = cam(
+                input_tensor=input_tensor,
+                targets=[ClassifierOutputTarget(0)]
+            )[0]
+
+            cam_norm = (grayscale_cam - grayscale_cam.min()) / \
+                       (grayscale_cam.max() - grayscale_cam.min() + 1e-8)
+
+            # ===============================
+            # 🔥 WAVELET BACKPROJECTION
+            # ===============================
+            wavelet_tensor = image_pair[i].cpu().numpy()
+
+            spatial_maps = []
+
+            for c in range(3):
+                LL = wavelet_tensor[c]
+                LH = wavelet_tensor[c + 3]
+                HL = wavelet_tensor[c + 6]
+                HH = wavelet_tensor[c + 9]
+
+                LL_w = LL * cam_norm
+                LH_w = LH * cam_norm
+                HL_w = HL * cam_norm
+                HH_w = HH * cam_norm
+                coeffs = (LL_w, (LH_w, HL_w, HH_w))
+
+                reconstructed = pywt.idwt2(coeffs, 'haar')
+                spatial_maps.append(np.abs(reconstructed))
+
+            spatial_map = np.mean(spatial_maps, axis=0)
+            spatial_map = (spatial_map - spatial_map.min()) / \
+                          (spatial_map.max() - spatial_map.min() + 1e-8)
+
+            # ===============================
+            # ORIGINAL IMAGE
+            # ===============================
+            spatial_img = spatial_images[global_idx]
+            spatial_img = cv2.cvtColor(spatial_img, cv2.COLOR_BGR2RGB)
+            spatial_img = cv2.resize(spatial_img,
+                                     (spatial_map.shape[1], spatial_map.shape[0]))
+            spatial_img = spatial_img.astype(np.float32) / 255.0
+
+            overlay = show_cam_on_image(spatial_img, spatial_map, use_rgb=True)
+
+            # ===============================
+            # SAVE PATH
+            # ===============================
+            base_path = os.path.join(
+                save_dir,
+                f"IDX-{global_idx}_GT-{gt_label}_PRED-{pred_label}"
+            )
+
+            # ---- BASIC SAVES ----
+            cv2.imwrite(f"{base_path}_gradcam.png",
+                        (cam_norm * 255).astype(np.uint8))
+
+            cv2.imwrite(f"{base_path}_spatial.png",
+                        (spatial_map * 255).astype(np.uint8))
+
+            cv2.imwrite(f"{base_path}_overlay.png",
+                        (overlay * 255).astype(np.uint8))
+
+            # ===============================
+            # 🎨 COLORBAR FIGURES (TEZ İÇİN)
+            # ===============================
+            plt.figure(figsize=(4, 4))
+            plt.imshow(cam_norm, cmap='jet')
+            plt.colorbar()
+            plt.axis('off')
+            plt.tight_layout()
+            plt.savefig(f"{base_path}_gradcam_colorbar.png", dpi=300)
+            plt.close()
+
+            plt.figure(figsize=(4, 4))
+            plt.imshow(spatial_map, cmap='jet')
+            plt.colorbar()
+            plt.axis('off')
+            plt.tight_layout()
+            plt.savefig(f"{base_path}_spatial_colorbar.png", dpi=300)
+            plt.close()
+
+            # ===============================
+            # BAND ANALYSIS
+            # ===============================
+            if args.feature == 'fft':
+                scores, dominant_band = band_contribution(cam_norm)
+
+            elif args.feature == 'wavelet':
+                scores, dominant_band = wavelet_band_contribution(
+                    wavelet_tensor,
+                    cam_norm
+                )
+            if args.feature == 'wavelet':
+                all_wavelet_scores.append(scores)
+                if gt_label == 'real':
+                    real_wavelet_scores.append(scores)
+                elif gt_label == 'fake':
+                    fake_wavelet_scores.append(scores)
+
+            with open(f"{base_path}_bands.txt", "w") as f:
+                f.write(f"GT: {gt_label}\n")
+                f.write(f"Prediction: {pred_label}\n\n")
+                for band in scores:
+                    f.write(f"{band}: {scores[band]:.6f}\n")
+                f.write(f"\nDominant: {dominant_band}\n")
+
             global_idx += 1
 
-    band_stats = {
-        "real": {"LOW": [], "MID": [], "HIGH": []},
-        "fake": {"LOW": [], "MID": [], "HIGH": []}
-    }
-    spatial_images, _ = read_test_images()
-    # Grad-CAM visualization — only for a few samples
-    # === FFT Grad-CAM (FAKE class) ===
-    for k, sample in enumerate(cam_cache):
-        gt_label = args.class_names[sample["gt"]]  # REAL / FAKE
-        pred_label = args.class_names[sample["pred"]]  # REAL / FAKE
-        input_tensor = sample["tensor"].unsqueeze(0).to(device)
-
-        # 0 = FAKE, 1 = REAL (according to your class order)
-        target = [ClassifierOutputTarget(0)]
-        cam_class = "FAKE_CAM"
-
-        grayscale_cam = cam(
-            input_tensor=input_tensor,
-            targets=target
-        )[0]
-
-        # Normalize CAM
-        cam_norm = (grayscale_cam - grayscale_cam.min()) / \
-                   (grayscale_cam.max() - grayscale_cam.min() + 1e-8)
-
-        # Band analysis
-        scores, dominant_band = band_contribution(cam_norm)
-        for band, score in scores.items():
-            band_stats[gt_label][band].append(score)
-
-        print(f"[GradCAM] Sample-{k}")
-        print(f"  GT   : {gt_label}")
-        print(f"  Pred : {pred_label}")
-        print(f"  Band scores: {scores}")
-        print(f"  FAKE decision dominated by: {dominant_band}")
-        print("\n=== Average FAKE Grad-CAM Band Contribution ===")
-        for class_name in band_stats:  # 'real' / 'fake'
-            print(f"\nClass: {class_name.upper()}")
-            for band in band_stats[class_name]:  # 'LOW', 'MID', 'HIGH'
-                values = band_stats[class_name][band]
-                avg = np.mean(values) if values else 0.0
-                print(f"  {band}: {avg:.4f}")
-
-        # ----- Load corresponding spatial image -----
-        spatial_img = spatial_images[sample["index"]]
-        spatial_img = cv2.cvtColor(spatial_img, cv2.COLOR_BGR2RGB)
-        spatial_img = cv2.resize(spatial_img, (224, 224))
-        spatial_img = spatial_img.astype(np.float32) / 255.0
-
-        # ----- FFT → spatial backprojection -----
-        fft_channels = fft_complex_rgb(spatial_img)
-        spatial_map = spatial_backprojection(fft_channels, cam_norm)
-
-        # ----- Overlay spatial artifact map -----
-        overlay = show_cam_on_image(
-            spatial_img,
-            spatial_map,
-            use_rgb=True
-        )
-
-        # ----- Save results -----
-        base_path = (
-            f"C:/Users/yild_hi/PycharmProjects/fakesatelliteimagedetection1/"
-            f"Spectral_Explainability/cam_epoch_{epoch}/"
-            f"GT-{gt_label}_PRED-{pred_label}_IDX-{sample['index']}"
-        )
-
-        cv2.imwrite(f"{base_path}_fft_cam.png", (cam_norm * 255).astype(np.uint8))
-        cv2.imwrite(f"{base_path}_spatial_projection.png", (overlay * 255).astype(np.uint8))
-        ## Save frequency CAM # First version of the gradcam
-        #cam_uint8 = (cam_norm * 255).astype(np.uint8)
-        #save_path = (
-        #    f"C:/Users/yild_hi/PycharmProjects/fakesatelliteimagedetection1/"
-        #    f"Cam_Results/cam_epoch_{epoch}/"
-        #    f"fft_cam_{batch_idx}_{i}_{dominant_band}.png"
-        #)
-        #cv2.imwrite(save_path, cam_uint8)
-
     performance_metrics(all_labels, all_preds, epoch)
+    # Wavelet Average Band Contribution
+    if args.feature == 'wavelet' and len(all_wavelet_scores) > 0:
+
+        mean_scores = {
+            "LL": 0.0,
+            "LH": 0.0,
+            "HL": 0.0,
+            "HH": 0.0
+        }
+
+        for s in all_wavelet_scores:
+            for key in mean_scores:
+                mean_scores[key] += s[key]
+
+        for key in mean_scores:
+            mean_scores[key] /= len(all_wavelet_scores)
+
+        print("\n=== Average Wavelet Band Contribution ===")
+        for k, v in mean_scores.items():
+            print(f"{k}: {v:.6f}")
+
+        bands = list(mean_scores.keys())
+        values = list(mean_scores.values())
+
+        plt.figure(figsize=(6, 4))
+        plt.bar(bands, values)
+        plt.xlabel("Wavelet Bands")
+        plt.ylabel("Contribution")
+        plt.title("Average Wavelet Band Contribution")
+
+        save_path = os.path.join(save_dir, "wavelet_band_distribution.png")
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+
+    if args.feature == 'wavelet':
+
+        real_mean = compute_mean_scores(real_wavelet_scores)
+        fake_mean = compute_mean_scores(fake_wavelet_scores)
+
+        print("\n=== REAL vs FAKE Wavelet Contribution ===")
+
+        print("\nREAL:")
+        for k, v in real_mean.items():
+            print(f"{k}: {v:.6f}")
+
+        print("\nFAKE:")
+        for k, v in fake_mean.items():
+            print(f"{k}: {v:.6f}")
+
+        bands = ["LL", "LH", "HL", "HH"]
+        real_vals = [real_mean[b] for b in bands]
+        fake_vals = [fake_mean[b] for b in bands]
+
+        x = np.arange(len(bands))
+        width = 0.35
+
+        plt.figure(figsize=(7, 5))
+        plt.bar(x - width / 2, real_vals, width, label='Real')
+        plt.bar(x + width / 2, fake_vals, width, label='Fake')
+
+        plt.xlabel("Wavelet Bands")
+        plt.ylabel("Contribution")
+        plt.title("Wavelet Band Contribution: Real vs Fake")
+        plt.xticks(x, bands)
+        plt.legend()
+
+        save_path = os.path.join(save_dir, "wavelet_real_vs_fake.png")
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+
+        with open(os.path.join(save_dir, "wavelet_real_vs_fake.txt"), "w") as f:
+            f.write("REAL:\n")
+            for k, v in real_mean.items():
+                f.write(f"{k}: {v:.6f}\n")
+
+            f.write("\nFAKE:\n")
+            for k, v in fake_mean.items():
+                f.write(f"{k}: {v:.6f}\n")
 
     num_tests = test_loader.dataset.labels.size(0)
+
     labels = np.vstack(labels).reshape(num_tests)
     predicts = np.vstack(predicts).reshape(num_tests)
-    outputs = np.vstack(outputs).reshape(num_tests, 2)
-    
+
     print('\33[91mTest set: {}\n\33[0m'.format(logger_test_name))
 
-    acc = np.sum(labels == predicts)/float(num_tests)
+    acc = np.sum(labels == predicts) / float(num_tests)
     print('\33[91mTest set: Accuracy: {:.8f}\n\33[0m'.format(acc))
-    
-    pos_label = labels[labels==1]
-    pos_pred = predicts[labels==1]
-    TPR = np.sum(pos_label == pos_pred)/float(pos_label.shape[0])
-    print('\33[91mTest set: TPR: {:.8f}\n\33[0m'.format(TPR))
-
-    neg_label = labels[labels==0]
-    neg_pred = predicts[labels==0]
-    TNR = np.sum(neg_label == neg_pred)/float(neg_label.shape[0])
-    print('\33[91mTest set: TNR: {:.8f}\n\33[0m'.format(TNR))
 
     return acc
 
@@ -524,9 +735,33 @@ def main(test_loaders, model):
         
 if __name__ == '__main__':
     if args.model == 'resnet':
-        model = models.resnet34(pretrained=True)
-        num_ftrs = model.fc.in_features
-        model.fc = nn.Linear(num_ftrs, 2)
+        if args.feature == 'wavelet':
+
+            model = models.resnet34(pretrained=False)
+
+            # Modify first conv layer to accept 12 channels
+            original_conv = model.conv1
+            model.conv1 = nn.Conv2d(
+                in_channels=12,
+                out_channels=original_conv.out_channels,
+                kernel_size=original_conv.kernel_size,
+                stride=original_conv.stride,
+                padding=original_conv.padding,
+                bias=original_conv.bias is not None
+            )
+
+            # Copy pretrained weights intelligently
+            with torch.no_grad():
+                model.conv1.weight[:, :3] = original_conv.weight
+                for i in range(3, 12):
+                    model.conv1.weight[:, i] = original_conv.weight[:, i % 3]
+
+            model.fc = nn.Linear(model.fc.in_features, 2)
+
+        else:
+            model = models.resnet34(pretrained=True)
+            num_ftrs = model.fc.in_features
+            model.fc = nn.Linear(num_ftrs, 2)
     elif args.model == 'pggan':
         model = pggan_dnet.SimpleDiscriminator(3, label_size=1, mbstat_avg='all', 
                 resolution=256, fmap_max=128, fmap_base=2048, sigmoid_at_end=False)
@@ -536,7 +771,8 @@ if __name__ == '__main__':
         model.classifier = nn.Linear(num_ftrs, 2)
 
     print('{}{}/checkpoint_{}.pth'.format(args.model_dir,suffix,args.epochs))
-    load_model = torch.load('{}{}/checkpoint_{}.pth'.format(args.model_dir,suffix,args.epochs))
+    load_model = torch.load('{}{}/checkpoint_{}.pth'.format(args.model_dir,suffix,args.epochs), map_location=torch.device('cpu'))
+    #load_model = torch.load('{}{}/checkpoint_{}.pth'.format(args.model_dir,suffix,args.epochs))
     model.load_state_dict(load_model['state_dict'])
 
     test_loaders = create_loaders()
