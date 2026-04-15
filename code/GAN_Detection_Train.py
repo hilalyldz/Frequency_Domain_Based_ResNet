@@ -191,7 +191,7 @@ class GANDataset(cycleGAN_dataset.cycleGAN_dataset):
         
         img = self.data[index]
         label = self.labels[index]
-        self.args.model = 'resnet'
+
         if self.train:
             #data augmentation for training
             if args.data_augment:
@@ -289,7 +289,7 @@ class GANDataset(cycleGAN_dataset.cycleGAN_dataset):
                     fft_img[21:203, 21:203] = 0
                 fft_img = np.fft.fftshift(fft_img)
             im[:, :, i] = fft_img
-            return im
+        return im
 
     def wavelet_transformation(self, im):
         im = im.astype(np.float32)
@@ -302,6 +302,11 @@ class GANDataset(cycleGAN_dataset.cycleGAN_dataset):
 
         resized_channels = [cv2.resize(c, (224, 224), interpolation=cv2.INTER_LINEAR) for c in wavelet_channels]
         im = np.stack(resized_channels, axis=0).astype(np.float32)
+        # Normalize to [-1,1]
+        im_min = im.min()
+        im_max = im.max()
+        im = (im - im_min) / (im_max - im_min + 1e-8)
+        im = (im - 0.5) * 2
         return im
 
     def high_pass_filter(self, fft_shifted):
@@ -314,14 +319,18 @@ class GANDataset(cycleGAN_dataset.cycleGAN_dataset):
         return fft_filtered
 
 def create_loaders():
+
     test_dataset_names = copy.copy(dataset_names)
 
     kwargs = {'num_workers': args.num_workers, 'pin_memory': args.pin_memory} if args.cuda else {}
 
-    transform = transforms.Compose([
+    if args.feature == 'wavelet':
+        transform = None
+    else:
+        transform = transforms.Compose([
             transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-            ])
+            transforms.Normalize((0.5,0.5,0.5),(0.5,0.5,0.5))
+    ])
 
     # Load full training dataset
     full_train_dataset = GANDataset(
@@ -541,6 +550,15 @@ def test(test_loader, model, epoch, logger, logger_test_name):
                     "pred": pred[i].item(),  # model prediction
                     "index": global_idx
                 })
+            else:
+                j =random.randint(0, global_idx)
+                if j < MAX_CAM_SAMPLES:
+                    cam_cache = {
+                    "tensor": image_pair[i].detach().cpu(),
+                    "gt": label[i].item(),  # ground truth
+                    "pred": pred[i].item(),  # model prediction
+                    "index": global_idx
+                }
             global_idx += 1
 
     band_stats = {
@@ -784,16 +802,21 @@ def read_test_images():
 
     return images, labels
 
-def plot_losses():
+def plot_losses(save_path="loss_curve.png"):
     plt.figure(figsize=(8, 6))
-    plt.plot(range(1, len(train_losses) + 1), train_losses, label='Train Loss', marker='o')
-    plt.plot(range(1, len(val_losses) + 1), val_losses, label='Validation Loss', marker='o')
+    plt.plot(range(1, len(train_losses) + 1), train_losses,
+             label='Train Loss', marker='o')
+    plt.plot(range(1, len(val_losses) + 1), val_losses,
+             label='Validation Loss', marker='o')
     plt.xlabel('Epochs')
     plt.ylabel('Loss')
     plt.title('Training and Validation Loss')
     plt.legend()
     plt.grid()
-    plt.show()
+
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()   # <-- important: prevents showing / memory leak
+
 
 def adjust_learning_rate(optimizer):
     """Updates the learning rate given the learning rate decay.
@@ -826,11 +849,15 @@ def create_optimizer(model, new_lr):
 def main(train_loader, val_loader, test_loaders, model, logger):
     print('\nparsed options:\n{}\n'.format(vars(args)))
 
+    # Set device
+    device = torch.device("cuda" if args.cuda else "cpu")
+    model = model.to(device)
+
     optimizer1 = create_optimizer(model, args.lr)
     criterion = nn.CrossEntropyLoss()
-    if args.cuda:
-        model.cuda()
-        criterion.cuda()
+    #if args.cuda:
+    #    model.cuda()
+    #    criterion.cuda()
 
     # optionally resume from a checkpoint
     if args.resume:
@@ -845,14 +872,16 @@ def main(train_loader, val_loader, test_loaders, model, logger):
             
     start = args.start_epoch
     end = start + args.epochs
-    for test_loader in test_loaders:
-        test(test_loader['dataloader'], model, 0, logger, test_loader['name'])
+    #for test_loader in test_loaders:
+    #    test(test_loader['dataloader'], model, 0, logger, test_loader['name'])
     for epoch in range(start, end):
         # iterate over test loaders and test results
         train(train_loader,val_loader, model, optimizer1, criterion, epoch, logger)
-        if epoch==(end-1):
-            for test_loader in test_loaders:
-                test(test_loader['dataloader'], model, epoch+1, logger, test_loader['name'])
+        #if epoch==(end-1):
+        #    for test_loader in test_loaders:
+        #        test(test_loader['dataloader'], model, epoch+1, logger, test_loader['name'])
+    for test_loader in test_loaders:
+        test(test_loader['dataloader'], model, end-1, logger, test_loader['name'])
     plot_losses()
         
 if __name__ == '__main__':
@@ -866,7 +895,7 @@ if __name__ == '__main__':
     pretrain_flag = not args.feature=='comatrix'
     if args.model == 'resnet':
         if args.feature == 'wavelet':
-            model = models.resnet34(pretrained=True)
+            model = models.resnet34(pretrained=False)
             new_input_channels = 12  # because you use LL, LH, HL, HH for R, G, B
             original_conv = model.conv1
             model.conv1 = nn.Conv2d(
