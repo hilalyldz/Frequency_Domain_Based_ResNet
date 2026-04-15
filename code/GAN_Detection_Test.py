@@ -1,34 +1,11 @@
-#!/usr/bin/python
-#-*- coding: utf-8 -*- 
-#===========================================================
-#  File Name: GAN_Detection_Train.py
-#  Author: Xu Zhang, Columbia University
-#  Creation Date: 09-07-2019
-#  Last Modified: Tue Oct 15 16:41:30 2019
-#
-#  Usage: python GAN_Detection_Test.py -h
-#  Description: Evaluate a GAN image detector
-#
-#  Copyright (C) 2019 Xu Zhang
-#  All rights reserved.
-# 
-#  This file is made available under
-#  the terms of the BSD license (see the COPYING file).
-#===========================================================
-
 from __future__ import division, print_function
-import sys
-from copy import deepcopy
 import argparse
 import torch
-import torch.nn as nn
-import torchvision.datasets as dset
 from torch.autograd import Variable
 import torch.backends.cudnn as cudnn
 import os
 from tqdm import tqdm
 import numpy as np
-import random
 import cv2
 import copy
 from GAN_Detection_Train import GANDataset
@@ -52,7 +29,7 @@ parser = argparse.ArgumentParser(description='PyTorch GAN Image Detection')
 
 # Training settings
 parser.add_argument('--dataroot', type=str,
-                    default=r'C:\Users\yild_hi\PycharmProjects\fakesatelliteimagedetection1\datasets',
+                    default=r'.\datasets',
                     help='path to dataset')
 parser.add_argument('--training-set', default= 'horse',
                     help='The name of the training set. If leave_one_out flag is set, \
@@ -113,7 +90,6 @@ suffix = '{}'.format(args.training_set)
 
 if args.test_set == 'transposed_conv':
     dataset_names = ['satellite']
-    #dataset_names = ['horse+zebra', 'apple+orange', 'summer+winter', 'facades', 'cityscapes', 'satellite', 'fold6', 'fold7', 'fold8', 'fold9']
 elif args.test_set == 'nn':
     dataset_names = ['horse_nn',  'zebra_nn', 'summer_nn', 'winter_nn', 'apple_nn', 'orange_nn', 'horse', 'zebra', 'summer', 'winter', 'apple', 'orange']
 elif args.test_set == 'jpg':
@@ -366,10 +342,12 @@ def test(test_loader, model, epoch, logger_test_name):
     cam_cache = []
     global_idx = 0
 
-    # Create CAM directory per epoch
-    if not os.path.exists(
-            f"C:/Users/yild_hi/PycharmProjects/fakesatelliteimagedetection1/Spectral_Explainability_FFT"):
-        os.makedirs(f"C:/Users/yild_hi/PycharmProjects/fakesatelliteimagedetection1/Spectral_Explainability_FFT")
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    PROJECT_ROOT = os.path.abspath(os.path.join(BASE_DIR, ".."))
+
+    EXPLAIN_DIR = os.path.join(PROJECT_ROOT, "outputs", "explainability")
+    os.makedirs(EXPLAIN_DIR, exist_ok=True)
+
     # Set up Grad Cam for ResNet model
     device = torch.device("cuda" if args.cuda else "cpu")
     model = model.to(device)
@@ -445,6 +423,9 @@ def test(test_loader, model, epoch, logger_test_name):
         if args.feature == 'fft':
 
             # === EXISTING FFT PIPELINE (UNCHANGED) ===
+            if sample["index"] >= len(spatial_images):
+                continue
+
             spatial_img = spatial_images[sample["index"]]
             spatial_img = cv2.cvtColor(spatial_img, cv2.COLOR_BGR2RGB)
             spatial_img = cv2.resize(spatial_img, (224, 224))
@@ -529,9 +510,8 @@ def test(test_loader, model, epoch, logger_test_name):
         # ------------------------------------------------
         # Create save path
         # ------------------------------------------------
-        base_path = (
-            f"C:/Users/yild_hi/PycharmProjects/fakesatelliteimagedetection1/"
-            f"Spectral_Explainability_FFT/"
+        base_path = os.path.join(
+            EXPLAIN_DIR,
             f"{args.feature.upper()}_GT-{gt_label}_PRED-{pred_label}_IDX-{sample['index']}"
         )
 
@@ -632,7 +612,7 @@ def test(test_loader, model, epoch, logger_test_name):
         print(f"HIGH: {np.mean(high_vals):.4f}")
 
     summary_csv_path = os.path.join(
-        "C:/Users/yild_hi/PycharmProjects/fakesatelliteimagedetection1/Spectral_Explainability_FFT/",
+        EXPLAIN_DIR,
         "band_summary.csv"
     )
 
@@ -700,7 +680,7 @@ def test(test_loader, model, epoch, logger_test_name):
 
     # SAVE
     plot_path = os.path.join(
-        "C:/Users/yild_hi/PycharmProjects/fakesatelliteimagedetection1/Spectral_Explainability_FFT/",
+        EXPLAIN_DIR,
         "band_contribution_plot.png"
     )
 
@@ -723,7 +703,7 @@ def test(test_loader, model, epoch, logger_test_name):
     plt.grid(alpha=0.3)
 
     hist_path = os.path.join(
-        "C:/Users/yild_hi/PycharmProjects/fakesatelliteimagedetection1/Spectral_Explainability_FFT/",
+        EXPLAIN_DIR,
         "high_freq_distribution.png"
     )
 

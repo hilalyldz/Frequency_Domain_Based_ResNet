@@ -1,39 +1,15 @@
-#!/usr/bin/python
-#-*- coding: utf-8 -*- 
-#===========================================================
-#  File Name: cycleGAN_dataset.py
-#  Author: Xu Zhang, Columbia University
-#  Creation Date: 09-07-2019
-#  Last Modified: Fri Sep 27 12:20:49 2019
-#
-#  Usage:
-#  Description: Read and Cache CycleGAN image dataset 
-#
-#  Copyright (C) 2019 Xu Zhang
-#  All rights reserved.
-# 
-#  This file is made available under
-#  the terms of the BSD license (see the COPYING file).
-#===========================================================
-
 import os
-import errno
 import numpy as np
-from PIL import Image
 import torch
 import torch.utils.data as data
-import collections
-from tqdm import tqdm
-import random
 import glob
 import cv2
 
 
-#import pdb
 
 class cycleGAN_dataset(data.Dataset):
     def __init__(self, root, name, train=True, leave_one_out = False, transform=None, check_cached=False):
-        self.image_dir = r"C:\Users\yild_hi\PycharmProjects\fakesatelliteimagedetection1\datasets"
+        self.image_dir = root
         self.root = os.path.expanduser(root)
         self.name = name
         self.data_dir = os.path.join(self.image_dir, name)
@@ -89,7 +65,7 @@ class cycleGAN_dataset(data.Dataset):
         if check_cached:
             if self._check_datafile_exists(data_file):
                 print('# Found cached data {}'.format(data_file))
-                #return
+                return
 
         # process and save as torch files
         print('# Caching data {}'.format(data_file))
