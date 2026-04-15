@@ -1,25 +1,5 @@
-#!/usr/bin/python
-#-*- coding: utf-8 -*- 
-#===========================================================
-#  File Name: run_test.py
-#  Author: Xu Zhang, Columbia University
-#  Creation Date: 09-07-2019
-#  Last Modified: Tue Oct 15 16:39:19 2019
-#
-#  Usage: python run_test.py -h
-#  Description: Evaluate a GAN image detector
-#
-#  Copyright (C) 2019 Xu Zhang
-#  All rights reserved.
-# 
-#  This file is made available under
-#  the terms of the BSD license (see the COPYING file).
-#===========================================================
-import numpy as np
-import scipy.io as sio
 import time
 import os
-import sys
 import subprocess
 import shlex
 import argparse
@@ -50,13 +30,6 @@ elif args.feature == 'wavelet':
     parameter_set = [
             ' --feature=wavelet '
             ]
-#Compare different frequency band
-#parameter_set = [
-#        ' --feature=fft '
-#        ' --feature=fft --mode=1'
-#        ' --feature=fft --mode=2'
-#        ' --feature=fft --mode=3'
-#        ]
 else:
     print('Not a valid feature!')
     exit(-1)
@@ -78,12 +51,6 @@ else:
     print('Not a valid dataset!')
     exit(-1)
 
-#leave one out setting 
-#datasets = ['horse+zebra --leave_one_out ', 'apple+orange --leave_one_out ',
-#            'summer+winter --leave_one_out ', 'cityscapes --leave_one_out ', 
-#            'satellite --leave_one_out ', 'facades --leave_one_out ', 
-#            'fold6 --leave_one_out ', 'fold7 --leave_one_out ',
-#            'fold8 --leave_one_out ', 'fold9 --leave_one_out ']
 process_set = []
 
 def run_command(command, log_file_path):
@@ -105,7 +72,7 @@ for dataset in datasets:
     for idx, parameter in enumerate(parameter_set):
         print('Test Parameter: {}'.format(parameter))
         command = 'python ./code/GAN_Detection_Test.py --training-set {} --model=resnet --test-set=transposed_conv --data_augment \
-                --batch-size=16 --test-batch-size=16 --epochs 20 {}  --gpu-id {} --model-dir ./model_resnet_cmf/ '\
+                --batch-size=16 --test-batch-size=16 --epochs 20 {}  --gpu-id {} --model-dir ./model_resnet/ '\
                 .format(dataset, parameter, gpu_set[idx%number_gpu]) 
         print(command)
 

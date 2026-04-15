@@ -1,21 +1,3 @@
-#!/usr/bin/python
-#-*- coding: utf-8 -*- 
-#===========================================================
-#  File Name: GAN_Detection_Train.py
-#  Author: Xu Zhang, Columbia University
-#  Creation Date: 09-07-2019
-#  Last Modified: Tue Oct 15 16:41:30 2019
-#
-#  Usage: python GAN_Detection_Test.py -h
-#  Description: Evaluate a GAN image detector
-#
-#  Copyright (C) 2019 Xu Zhang
-#  All rights reserved.
-# 
-#  This file is made available under
-#  the terms of the BSD license (see the COPYING file).
-#===========================================================
-
 from __future__ import division, print_function
 import argparse
 import torch
@@ -47,7 +29,7 @@ parser = argparse.ArgumentParser(description='PyTorch GAN Image Detection')
 
 # Training settings
 parser.add_argument('--dataroot', type=str,
-                    default=r'C:\Users\yild_hi\PycharmProjects\fakesatelliteimagedetection1\CMF_Data_original',
+                    default=r'.\datasets',
                     help='path to dataset')
 parser.add_argument('--training-set', default= 'horse',
                     help='The name of the training set. If leave_one_out flag is set, \
@@ -101,6 +83,8 @@ parser.add_argument('--no-cuda', action='store_true', default=False,
                     help='disables CUDA training')
 parser.add_argument('--gpu-id', default='0', type=str,
                     help='id(s) for CUDA_VISIBLE_DEVICES')
+parser.add_argument('--output-dir', type=str, default='./outputs',
+                    help='directory to save visual results')
 
 args = parser.parse_args()
 
@@ -440,7 +424,7 @@ def test(test_loader, model, epoch, logger_test_name):
     real_wavelet_scores = []
     fake_wavelet_scores = []
 
-    save_dir = f"C:/Users/yild_hi/PycharmProjects/fakesatelliteimagedetection1/Spectral_Explainability_ALL/"
+    save_dir = os.path.join(args.output_dir, "spectral_explainability")
     os.makedirs(save_dir, exist_ok=True)
 
     device = torch.device("cuda" if args.cuda else "cpu")
@@ -482,6 +466,12 @@ def test(test_loader, model, epoch, logger_test_name):
         # 🔥 Grad-CAM for ALL IMAGES
         # ===============================
         for i in range(image_pair.size(0)):
+            idx = batch_idx * args.test_batch_size + i
+
+            if idx >= len(spatial_images):
+                continue
+
+
 
             input_tensor = image_pair[i].unsqueeze(0).to(device)
 
@@ -526,7 +516,7 @@ def test(test_loader, model, epoch, logger_test_name):
             # ===============================
             # ORIGINAL IMAGE
             # ===============================
-            spatial_img = spatial_images[global_idx]
+            spatial_img = spatial_images[idx]
             spatial_img = cv2.cvtColor(spatial_img, cv2.COLOR_BGR2RGB)
             spatial_img = cv2.resize(spatial_img,
                                      (spatial_map.shape[1], spatial_map.shape[0]))
@@ -771,8 +761,8 @@ if __name__ == '__main__':
         model.classifier = nn.Linear(num_ftrs, 2)
 
     print('{}{}/checkpoint_{}.pth'.format(args.model_dir,suffix,args.epochs))
-    load_model = torch.load('{}{}/checkpoint_{}.pth'.format(args.model_dir,suffix,args.epochs), map_location=torch.device('cpu'))
-    #load_model = torch.load('{}{}/checkpoint_{}.pth'.format(args.model_dir,suffix,args.epochs))
+    model_path = os.path.join(args.model_dir, suffix, f"checkpoint_{args.epochs}.pth")
+    load_model = torch.load(model_path, map_location=torch.device('cpu'))
     model.load_state_dict(load_model['state_dict'])
 
     test_loaders = create_loaders()
